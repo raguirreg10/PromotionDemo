@@ -1,0 +1,88 @@
+name: Bump version official
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: write 
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide bump and next version
+        id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Find the last tag (expects vX.Y.Z). Default to v0.0.0 if none.
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          RANGE="${LAST_TAG}..HEAD"
+          if [[ "$LAST_TAG" == "v0.0.0" ]]; then
+            RANGE=""
+          fi
+
+          # Gather logs
+          LOG_SUBJECTS=$( [[ -z "$RANGE" ]] && git log --format=%s || git log --format=%s "$RANGE" )
+          LOG_FULL=$(     [[ -z "$RANGE" ]] && git log --format=%s%n%b || git log --format=%s%n%b "$RANGE" )
+
+          # Default bump
+          BUMP="none"
+
+          # 1) Breaking changes: "BREAKING CHANGE" in body/footer OR "type!:" in subject
+          if echo "$LOG_FULL" | grep -Eq '(^|[^A-Z])BREAKING CHANGE'; then
+            BUMP="major"
+          elif echo "$LOG_SUBJECTS" | grep -Eq '^[a-z]+(\([^)]+\))?!:'; then
+            BUMP="major"
+          fi
+
+          # 2) Features -> minor (only if not already major)
+          if [[ "$BUMP" == "none" ]] && echo "$LOG_SUBJECTS" | grep -Eq '^feat(\([^)]+\))?:'; then
+            BUMP="minor"
+          fi
+
+          # 3) Fixes -> patch (only if not already minor/major)
+          if [[ "$BUMP" == "none" ]] && echo "$LOG_SUBJECTS" | grep -Eq '^fix(\([^)]+\))?:'; then
+            BUMP="patch"
+          fi
+
+          if [[ "$BUMP" == "none" ]]; then
+            echo "No release-worthy commits since $LAST_TAG"
+            echo "bump=none" >> "$GITHUB_OUTPUT"
+            echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Compute next semver from LAST_TAG (strip leading v)
+          CUR="${LAST_TAG#v}"
+          IFS='.' read -r MAJ MIN PAT <<< "$CUR"
+          case "$BUMP" in
+            major) MAJ=$((MAJ+1)); MIN=0; PAT=0 ;;
+            minor) MIN=$((MIN+1)); PAT=0 ;;
+            patch) PAT=$((PAT+1)) ;;
+          esac
+          NEW_VERSION="${MAJ}.${MIN}.${PAT}"
+
+          echo "bump=$BUMP"                 >> "$GITHUB_OUTPUT"
+          echo "new_version=$NEW_VERSION"   >> "$GITHUB_OUTPUT"
+          echo "last_tag=$LAST_TAG"         >> "$GITHUB_OUTPUT"
+
+      - name: Stop if no bump
+        if: steps.bump.outputs.bump == 'none'
+        run: echo "Skipping tag creation."
+
+      - name: Create tag and push
+        if: steps.bump.outputs.bump != 'none'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.bump.outputs.new_version }}" -m "Release v${{ steps.bump.outputs.new_version }}"
+          git push origin "v${{ steps.bump.outputs.new_version }}"
